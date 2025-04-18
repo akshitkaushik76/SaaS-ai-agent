@@ -1,31 +1,46 @@
 const { application } = require('express');
-const task = require('../model/ResModbl');
+const TaskModel = require('../model/ResModel');
 const {exec} = require('child_process');
-
+const Groq = require('groq-sdk');
+const groq = new Groq({
+   apiKey:process.env.GROQ_API_KEY
+})
 async function CreatePlan(prompt,feedback) {//takes two parameter
-   const apiKey = process.env.api_key;
-   const fullPrompt  = feedback?`Retry task with the feedback\n\nOriginal task:${prompt}`:`Create a step-by-step plan to:${prompt}`;
-   const response = await fetch('https://api.groq.com/openai/v1/chat/completions',{
-      method:POST,
-      headers:{
-         'Authorization':`Bearer ${apiKey}`,
-         'Content-Type':application/json
-      },
-      body:JSON.stringify({
-         model:'llama3-8b-8192',
+   const fullprompt  = feedback?`Retry task with the feedback\n\nOriginal task:${prompt}`:`Create a step-by-step to plan to:${prompt}`;
+   try{
+      const response = await groq.chat.completions.create({
+         model: 'llama3-8b-8192',
          messages:[
-            {//defining the system role and behavior
-               role:'system',content:'You are an assistant that help create task execution plans.'
-            },
-            {
-               role:'user',content:fullPrompt
-            },
-         ],
-      }),
-   });
-   const data = await response.json();
-   return data.choices[0].message.content.trim();
+            {role:'system',content:'You are an assistant that helps create task execution plans.'},
+            {role:'user',content:fullprompt}
+         ]
+      });
+      const plan = response.choices[0].message.content.trim();
+      return plan;
+   }catch(error) {
+      console.error('Groq plan generation failed',error);
+      throw new Error('Failed to generate plan from groq');
+   }
 } 
+async function translateToShellCommands(plan) {
+   const prompt = `You are a helpful assistant that converts plain language developer instructions into shell commands.
+   Instruction:
+   ${plan}
+   respond ONLY in shell commands , one per line.do NOT add explaination.`;
+   try{
+      const response = await groq.chat.completions.create({
+         model:'llama3-8b-8192',
+         messages:[{role:'user',content:prompt}],
+         temperature:0//returns most likely answer
+      });
+      const commands = response.choices[0].message.content.trim();
+      return commands;
+   }
+   catch(error) {
+      console.log('groq translation failed',error);
+      throw new Error('failed to translate task');
+   }
+}
 function extractshell(plan) {
    return plan
    .split('\n')//split the string into lines
@@ -33,29 +48,42 @@ function extractshell(plan) {
    .filter(cmd=> cmd && !cmd.toLowerCase().startsWith('note'))// keep non-empty lines that 
 }
 async function executePlan(plan) {
-   const commands = extractshell(plan);//helper function parses text and returns only executables command lines as an array
-   let output = '';
-   for(const command of commands) {
-      const result = await new Promise((resolve,reject)=>{//helps to run shell commands syncronously inside the loop, we use promise to make it awaitable.
-           exec(command,{cwd:process.cwd()},(error,stdout,stderr)=>{//{cwd:process.cwd()} sets the current working directory(cwd) where nodejs process was started
-            if(error) reject(stderr || error.message);
-            else resolve(stdout);
-           })                                               //exec() function nodejs childprocess method is callback based,notpromise based
-      })
-      output+=`\n$ ${command}\n${result}`;
+   const lines = plan.split('\n');
+   const commands = [];
+ 
+   for (let line of lines) {
+     line = line.trim();
+     if (!line) continue;
+ 
+     // Match embedded shell commands like "Run the command mkdir xyz to create..."
+     const match = line.match(/(?:run\s+(?:the\s+)?command\s+)([^\n\.\!]+?)(?=\s+(to|and|in|with|for)|[\.\!]|$)/i);
+     if (match) {
+       const cmd = match[1].trim();
+       if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(cmd)) {
+         commands.push(cmd);
+         continue;
+       }
+     }
+ 
+     // Match raw command lines
+     if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(line)) {
+       commands.push(line);
+     }
    }
-   return output;
-
-}
+ 
+   return commands;
+ }
+ 
+ 
 exports.createTask = async (req,res)=>{
    try{
-      const {taskdesc,feedBack} = req.body;
-      if(!taskdesc) {
+      const {taskDesc,feedBack} = req.body;
+      if(!taskDesc) {
          return res.status(400).json({error:'task description is required'})
       }
-      const plan = await CreatePlan(taskdesc,feedBack);
-      const task = new task({
-         taskdesc,
+      const plan = await CreatePlan(taskDesc,feedBack);
+      const task = new TaskModel({
+         taskDesc,
          plan,
          status:'pending',
          feedBack:feedBack || undefined,
@@ -68,33 +96,63 @@ exports.createTask = async (req,res)=>{
    }
    
 };
-exports.executeTask = async (req,res,next)=>{
+exports.executeTask = async (req, res, next) => {
    try{
       const {taskid} = req.params;
-      const Task = await task.findById(taskid);
+      const Task = await TaskModel.findById(taskid);
       if(!Task) {
          return res.status(404).json({error:'Task not found'});
       }
-      if(Task.status!=='pending') {
-         return res.status(400).json({error:'Task already executed'});
+      if(Task.status!=='pending' && Task.status!=='exec') {
+         return res.status(400).json({error:'task already executed'});
       }
-      const output = await executePlan(Task.plan);
-      task.status = 'completed';
-      await task.save();
+      Task.status = 'exec';
+      await Task.save();
+      const shellPlan = await translateToShellCommands(Task.plan);
+      const commands = shellPlan.split('\n');
+      const output = [];
+      for(const cmd of commands) {
+         if(!cmd.trim()) continue;
+         await new Promise((resolve,reject)=>{
+            exec(cmd,{cwd:process.env.USERPROFILE+'\\Desktop',shell:'cmd.exe'},(error,stdout,stderr)=>{
+               if(error) {
+                  reject(`Error executing the command:${error.message}`);
+               } else if(stderr) {
+                  reject(`stderr:${stderr}`);
+               } else{
+                  output.push(stdout);
+                  resolve();
+               }
+            });
+         }).catch((err)=>{
+            output.push(err);
+         });
+      }
+      Task.status = 'completed'
+      await Task.save();
       res.status(200).json({taskid,output});
-} catch(error) {
-   const Task = await task.findById(req.params.taskid);
-   if(Task) {
-      task.status = 'Failed';
-      await task.save();
-   } 
-   res.status(500).json({error:`Failed to fetch task:${error.message}`});
-}
+   } catch(error) {
+      console.error("Error during task execution:",error);
+      try{
+         const Task = await TaskModel.findById(req.params.taskid);
+         if(Task) {
+            Task.status = 'failed';
+            await Task.save();
+         }
+      } catch(updateError) {
+         console.error("Failed to update task status",updateError);
+      }
+      res.status(500).json({
+         error:`Failed to fetch task:${error?.message || error}`
+      });
+   }
 };
+ 
+ 
 exports.getTask = async(req,res,next)=>{
    try{
       const {taskid} = req.params;
-      const Task = await Task.findById(taskid);
+      const Task = await TaskModel.findById(taskid);
       if(!Task) {
          return res.status(404).json({error:'task not found'});
       } 
