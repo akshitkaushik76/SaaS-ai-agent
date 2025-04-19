@@ -1,7 +1,16 @@
-const { application } = require('express');
+const express = require('express');
 const TaskModel = require('../model/ResModel');
 const {exec} = require('child_process');
 const Groq = require('groq-sdk');
+const os = require('os');
+const { compileFunction } = require('vm');
+const fs = require('fs');
+const path = require('path');
+
+const workingDir = os.platform() === 'win32'?`${process.env.USERPROFILE}\\Desktop`:`${process.env.HOME}/Desktop`
+
+const isGitRepo = fs.existsSync(path.join(workingDir,'.git'));
+
 const groq = new Groq({
    apiKey:process.env.GROQ_API_KEY
 })
@@ -22,11 +31,16 @@ async function CreatePlan(prompt,feedback) {//takes two parameter
       throw new Error('Failed to generate plan from groq');
    }
 } 
+
+
+
 async function translateToShellCommands(plan) {
-   const prompt = `You are a helpful assistant that converts plain language developer instructions into shell commands.
-   Instruction:
-   ${plan}
-   respond ONLY in shell commands , one per line.do NOT add explaination.`;
+   const prompt = `You are a helpful assistant that converts plain English developer instructions into pure shell commands.
+ONLY return the shell commands, with NO explanations, NO headings, NO markdown (like \`\`\`), and NO extra text.
+Just output one command per line.
+
+Instruction:
+${plan}`;
    try{
       const response = await groq.chat.completions.create({
          model:'llama3-8b-8192',
@@ -41,38 +55,39 @@ async function translateToShellCommands(plan) {
       throw new Error('failed to translate task');
    }
 }
-function extractshell(plan) {
-   return plan
-   .split('\n')//split the string into lines
-   .map(line=>line.trim().replace(/^\d+\.\s*/,'')) //remove leading numbers like "1. ","2. ",etc.
-   .filter(cmd=> cmd && !cmd.toLowerCase().startsWith('note'))// keep non-empty lines that 
-}
-async function executePlan(plan) {
-   const lines = plan.split('\n');
-   const commands = [];
+// function extractshell(plan) {
+//    return plan
+//    .split('\n')//split the string into lines
+//    .map(line=>line.trim().replace(/^\d+\.\s*/,'')) //remove leading numbers like "1. ","2. ",etc.
+//    .filter(cmd=> cmd && !cmd.toLowerCase().startsWith('note'))
+// }
+
+
+
+// async function executePlan(plan) {
+//    const lines = plan.split('\n');
+//    const commands = [];
  
-   for (let line of lines) {
-     line = line.trim();
-     if (!line) continue;
+//    for (let line of lines) {
+//      line = line.trim();
+//      if (!line) continue;
  
-     // Match embedded shell commands like "Run the command mkdir xyz to create..."
-     const match = line.match(/(?:run\s+(?:the\s+)?command\s+)([^\n\.\!]+?)(?=\s+(to|and|in|with|for)|[\.\!]|$)/i);
-     if (match) {
-       const cmd = match[1].trim();
-       if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(cmd)) {
-         commands.push(cmd);
-         continue;
-       }
-     }
+     
+//      const match = line.match(/(?:run\s+(?:the\s+)?command\s+)([^\n\.\!]+?)(?=\s+(to|and|in|with|for)|[\.\!]|$)/i);
+//      if (match) {
+//        const cmd = match[1].trim();
+//        if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(cmd)) {
+//          commands.push(cmd);
+//          continue;
+//        }
+//      }
+//       if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(line)) {
+//        commands.push(line);
+//      }
+//    }
  
-     // Match raw command lines
-     if (/^(cd|echo|mkdir|touch|rm|ls|python|node|git|npm|npx)\b/.test(line)) {
-       commands.push(line);
-     }
-   }
- 
-   return commands;
- }
+//    return commands;
+//  }
  
  
 exports.createTask = async (req,res)=>{
@@ -96,55 +111,84 @@ exports.createTask = async (req,res)=>{
    }
    
 };
+
+function translatetoPlatformCommand(cmd) {
+   if(os.platform()!== 'win32') return cmd;//no change for the unix systems
+   const [baseCmd, ...args] = cmd.trim().split(/\s+/)//baseCmd will have the first word , eg.touch and the rest part in an array using the rest operator(...),splitting done by rejex expression.
+   let argString = args.join(' ');//converts array into space seperated string
+   argString = argString.replace(/([^"]\S*\s+\S*)/g,match=>`"${match}"`)//wrapping arguements in quotes if they contain space
+   switch(baseCmd) {
+      case 'touch':
+         return `New-Item ${argString} -ItemType File -Force`//touch is a unix command and will not work in windows , what we do , we convert the touch command into its equivalent in windows
+      case 'ls':
+         return 'Get-ChildItem';  //in windows ls->Get-Children
+      case 'mkdir':
+         return `New-Item ${argString} -ItemType Directory -Force`;//creating a new directory
+      case 'cat':
+         return `Get-Content ${argString}`;//reads file and give output the content
+      case 'echo':
+         return `Write-Output ${argString}`;//displays a message or a string to a termminal
+      case 'cd':
+         return `Set-Location ${argsString}`;
+      default:
+         return cmd;              
+   }
+}
+
 exports.executeTask = async (req, res, next) => {
    try{
       const {taskid} = req.params;
       const Task = await TaskModel.findById(taskid);
       if(!Task) {
-         return res.status(404).json({error:'Task not found'});
+         return res.status(404).json({error:'Task does not exist'});
       }
       if(Task.status!=='pending' && Task.status!=='exec') {
          return res.status(400).json({error:'task already executed'});
-      }
+      }//task can only be executed if its either pending or exec
       Task.status = 'exec';
       await Task.save();
+      //converts the task's plan "natural language instructions" into a series of shell commands
       const shellPlan = await translateToShellCommands(Task.plan);
-      const commands = shellPlan.split('\n');
+      //split the shell commands into array of individual commands
+      const commands = shellPlan.split('\n').map(cmd=>cmd.trim()).filter(Boolean)//removes any false values like empty string
       const output = [];
+      //creating different paths for unix and windows systems
+      
+      //setting shell for the platform powershell->windows,bash->unix like systems
+      const shell = os.platform() === 'win32'?'Powershell.exe':'/bin/bash'
+
       for(const cmd of commands) {
-         if(!cmd.trim()) continue;
+         if(cmd.trim() === '...' || cmd.includes('...')) {
+            output.push('skipped invalid placeholder command');
+            continue;
+         }
+         if(cmd.startsWith('git') && !isGitRepo) {
+            output.push('skipped Git command:not a git repo');
+            continue;
+         }
+         const translatecmd = translatetoPlatformCommand(cmd);
          await new Promise((resolve,reject)=>{
-            exec(cmd,{cwd:process.env.USERPROFILE+'\\Desktop',shell:'cmd.exe'},(error,stdout,stderr)=>{
+            exec(translatecmd,{cwd:workingDir,shell},(error,stdout,stderr)=>{
                if(error) {
-                  reject(`Error executing the command:${error.message}`);
+                  //if error happens in execution then reject the promise
+                  reject(`Error executing the commands: ${error.message}`);
                } else if(stderr) {
+                  //if there any error (stderr), reject the promise with this message
                   reject(`stderr:${stderr}`);
                } else{
                   output.push(stdout);
-                  resolve();
+                  resolve();//resolve the promise once command has completed successfully
                }
             });
-         }).catch((err)=>{
+         }).catch(err=>{
+            //if promise is rejected (error or stderr),store the error message
             output.push(err);
-         });
+         })
       }
-      Task.status = 'completed'
-      await Task.save();
-      res.status(200).json({taskid,output});
-   } catch(error) {
-      console.error("Error during task execution:",error);
-      try{
-         const Task = await TaskModel.findById(req.params.taskid);
-         if(Task) {
-            Task.status = 'failed';
-            await Task.save();
-         }
-      } catch(updateError) {
-         console.error("Failed to update task status",updateError);
-      }
-      res.status(500).json({
-         error:`Failed to fetch task:${error?.message || error}`
-      });
+      res.status(200).json({output});
+      
+   }catch(error) {
+      res.status(500).json({error:`Failed to execute task:${error.message}`});
    }
 };
  
