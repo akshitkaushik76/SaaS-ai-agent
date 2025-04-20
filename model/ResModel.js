@@ -1,32 +1,48 @@
 const mongoose = require('mongoose');
-const TaskSchema = new mongoose.Schema({
-    taskDesc:{
-        type:String,
-        required:true,
-        trim:true
+
+const taskSchema = new mongoose.Schema({
+    taskDesc: {
+        type: String,
+        required: true,
+        trim: true
     },
-    plan:{
-        type:String,
-        required:true,
-        trim:true,
+    plan: {
+        type: String,
+        required: true
     },
-    status:{
-        type:String,
-        enum:['pending','completed','failed','exec'],
-        default:'pending'
+    status: {
+        type: String,
+        enum: ['pending', 'exec', 'completed', 'failed'],
+        default: 'pending'
     },
-    feedBack:{
-        type:String,
-        trim:true,
+    feedBack: {
+        type: String,
+        default: ''
     },
-    retryCount:{
-        type:Number,
-        default:0
+    retryCount: {
+        type: Number,
+        default: 0
     },
-    createdAt:{
-        type:Date,
-        default:Date.now()
+    content:{
+        type:String
+    },
+    shellCommands: {
+        type: String,
+        default: ''
+    },
+    output: {
+        type: String,
+        default: ''
+    },
+    error: {
+        type: String,
+        default: ''
     }
-})
-const task = mongoose.model('task',TaskSchema);
-module.exports = task;
+    
+}, {
+    timestamps: true  // To automatically track createdAt and updatedAt fields
+});
+
+const TaskModel = mongoose.model('Task', taskSchema);
+
+module.exports = TaskModel;
