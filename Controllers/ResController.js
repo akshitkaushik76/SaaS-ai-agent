@@ -111,7 +111,7 @@ const executeTask = async (req, res) => {
      const task = await TaskModel.findById(taskid);
      if (!task) return res.status(404).json({ error: 'Task not found' });
  
-     // 🧠 Determine language based on task description
+     //  Determine language based on task description
      let language = task.language;
      if (task.taskDesc.toLowerCase().includes('text file')) {
        language = 'text';
@@ -130,7 +130,7 @@ const executeTask = async (req, res) => {
        language = langResponse.choices[0].message.content.trim();
      }
  
-     // 🌍 Determine file extension dynamically
+     //  Determine file extension dynamically
      const extension = getFileExtension(language.toLowerCase());
      const fileName = `task.${extension}`;
      const filePath = path.join(workingDir, fileName);
@@ -155,7 +155,7 @@ const executeTask = async (req, res) => {
  
      const taskCode = codeResponse.choices[0].message.content.trim();
  
-     // 🛠 Create shell command to write content to the correct file
+     //  Create shell command to write content to the correct file
      const writeCommand = os.platform() === 'win32'
        ? `echo ${JSON.stringify(taskCode)} > ${fileName}`
        : `echo "${escapeDoubleQuotes(taskCode)}" > ${fileName}`;
