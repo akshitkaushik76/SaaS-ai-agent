@@ -1,23 +1,16 @@
 ```
-function quicksort(array) {
-  if (array.length <= 1) {
-    return array;
+function quicksort(arr) {
+  if (arr.length <= 1) return arr;
+  var pivot = arr[0];
+  var left = [];
+  var right = [];
+  for (var i = 1; i < arr.length; i++) {
+    if (arr[i] <= pivot) left.push(arr[i]);
+    else right.push(arr[i]);
   }
-
-  let pivot = array[0];
-  let less = [];
-  let greater = [];
-
-  for (let i = 1; i < array.length; i++) {
-    if (array[i] <= pivot) {
-      less.push(array[i]);
-    } else {
-      greater.push(array[i]);
-    }
-  }
-
-  return quicksort(less).concat(pivot, quicksort(greater));
+  return quicksort(left).concat([pivot], quicksort(right));
 }
 
-module.exports = quicksort;
+var arr = [5, 2, 8, 3, 1, 6, 4];
+console.log(quicksort(arr));
 ```
